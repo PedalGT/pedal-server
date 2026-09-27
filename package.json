@@ -1,0 +1,13 @@
+{
+  "name": "pedal-server",
+  "version": "0.1.0",
+  "description": "Peer-to-peer campus bike share: API, rider/owner web app, and admin dashboard",
+  "main": "server.js",
+  "scripts": {
+    "start": "node --env-file-if-exists=.env server.js"
+  },
+  "dependencies": {
+    "@google/genai": "^2.24.0",
+    "express": "^4.19.2"
+  }
+}

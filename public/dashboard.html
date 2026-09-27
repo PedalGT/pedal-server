@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Pedal fleet dashboard</title>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600&family=Barlow+Condensed:wght@500;600;700&display=swap">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+  <style>
+    :root { --asphalt:#243038; --lane:#1F8A5B; --reflector:#F4C542; --paper:#F5F7F6; --curb:#D5DBDA; --muted:#5E6B70; --alert:#C8412F;
+            --display:"Barlow Condensed","Arial Narrow",sans-serif; --body:"Barlow",system-ui,sans-serif; }
+    * { box-sizing: border-box; }
+    body { margin:0; font-family:var(--body); color:var(--asphalt); background:var(--paper); }
+    header { background:var(--asphalt); color:#fff; padding:16px 28px; display:flex; justify-content:space-between; align-items:center; gap:16px; flex-wrap:wrap; }
+    header h1 { font-family:var(--display); font-weight:700; font-size:1.6rem; margin:0; }
+    .live { font-size:.9rem; color:#C9D2D4; }
+    main { padding:24px 28px; display:grid; gap:24px; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); max-width:1400px; margin:0 auto; }
+    @media (max-width: 900px) { main { grid-template-columns: 1fr; padding:16px; } }
+    .stats { grid-column:1 / -1; display:flex; flex-wrap:wrap; gap:32px; padding-bottom:8px; border-bottom:1.5px solid var(--curb); }
+    .stat b { display:block; font-family:var(--display); font-weight:700; font-size:2.4rem; line-height:1; font-variant-numeric:tabular-nums; }
+    .stat span { color:var(--muted); font-size:.9rem; }
+    #map { height:520px; border-radius:14px; border:1.5px solid var(--curb); }
+    h2 { font-family:var(--display); font-weight:600; font-size:1.35rem; margin:0 0 10px; }
+    .scroll { overflow-x:auto; }
+    table { width:100%; border-collapse:collapse; font-size:.92rem; }
+    th { text-align:left; font-weight:600; color:var(--muted); padding:8px 10px 8px 0; border-bottom:1.5px solid var(--curb); white-space:nowrap; }
+    td { padding:10px 10px 10px 0; border-bottom:1px solid var(--curb); vertical-align:top; }
+    .code { font-family:var(--display); font-weight:600; letter-spacing:.1em; }
+    .dot { display:inline-block; width:10px; height:10px; border-radius:50%; margin-right:6px; }
+    .dot.available { background:var(--lane); } .dot.in_use { background:var(--reflector); box-shadow:0 0 0 1.5px var(--asphalt); } .dot.offline { background:#9AA4A7; }
+    .off { color:var(--alert); } .on { color:var(--lane); }
+    .pin { width:30px; height:30px; border-radius:50%; border:3px solid #fff; box-shadow:0 0 0 1.5px var(--asphalt); }
+    .pin.available { background:var(--lane); } .pin.in_use { background:var(--reflector); } .pin.offline { background:#9AA4A7; }
+    .err { padding:40px 28px; }
+    .side { display:flex; flex-direction:column; gap:24px; min-width:0; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Pedal fleet</h1>
+    <span class="live" id="live">Connecting&hellip;</span>
+  </header>
+  <main id="main">
+    <section class="stats" id="stats"></section>
+    <section>
+      <h2>Where the bikes are</h2>
+      <div id="map" aria-label="Map of every bike's last known location"></div>
+    </section>
+    <section class="side">
+      <div>
+        <h2>Fleet</h2>
+        <div class="scroll"><table><thead><tr><th>Bike</th><th>Status</th><th>Lock</th><th>Owner</th></tr></thead><tbody id="fleet"></tbody></table></div>
+      </div>
+      <div>
+        <h2>Recent rides</h2>
+        <div class="scroll"><table><thead><tr><th>Rider</th><th>Bike</th><th>Time</th><th>Fare</th></tr></thead><tbody id="rides"></tbody></table></div>
+      </div>
+    </section>
+  </main>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+  <script>
+    const key = new URLSearchParams(location.search).get('key') || '';
+    const money = c => '$' + (c / 100).toFixed(2);
+    const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    const ago = t => { if (!t) return 'never'; const s = Math.round((Date.now() - t) / 1000); return s < 60 ? s + 's ago' : s < 3600 ? Math.round(s/60) + 'm ago' : Math.round(s/3600) + 'h ago'; };
+    const map = typeof L !== 'undefined' ? L.map('map').setView([33.7756, -84.3963], 16) : null;
+    if (map) L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '&copy; OpenStreetMap contributors' }).addTo(map);
+    else document.getElementById('map').textContent = 'Map unavailable offline.';
+    let markers = [], fitted = false;
+
+    async function load() {
+      const res = await fetch('/api/admin/overview', { headers: { 'X-Admin-Key': key } });
+      if (res.status === 401) {
+        document.getElementById('main').outerHTML = '<p class="err">Add your admin key to the address: /dashboard?key=YOUR_KEY (the default is "admin").</p>';
+        return false;
+      }
+      const d = await res.json();
+      const s = d.stats;
+      document.getElementById('stats').innerHTML = [
+        [s.bikes, 'bikes listed'], [s.activeRides, 'riding now'], [s.totalRides, 'rides completed'],
+        [money(s.grossCents), 'rider fares'], [money(s.ownerPayoutCents), 'paid to owners'], [((s.co2SavedGrams || 0) >= 1000 ? ((s.co2SavedGrams / 1000).toFixed(1) + ' kg') : ((s.co2SavedGrams || 0) + ' g')), 'CO₂ saved vs driving'], [s.users, 'accounts']
+      ].map(([v, l]) => `<div class="stat"><b>${v}</b><span>${l}</span></div>`).join('');
+
+      if (map) {
+      markers.forEach(m => m.remove());
+      markers = d.bikes.filter(b => b.lastLat != null).map(b =>
+        L.marker([b.lastLat, b.lastLng], { icon: L.divIcon({ className: '', html: `<div class="pin ${b.status}"></div>`, iconSize: [30, 30], iconAnchor: [15, 15] }) })
+          .bindPopup(`<b>${esc(b.name)}</b> (${b.code})<br>${b.status === 'in_use' ? 'Ridden by ' + esc(b.riderName) : 'Left here ' + ago(b.lastLocationAt)}<br>Owner: ${esc(b.ownerName)}`)
+          .addTo(map));
+      if (!fitted && markers.length) { map.fitBounds(L.featureGroup(markers).getBounds().pad(0.3), { maxZoom: 17 }); fitted = true; }
+      }
+
+      document.getElementById('fleet').innerHTML = d.bikes.length ? d.bikes.map(b => `
+        <tr><td>${esc(b.name)}<br><span class="code">${b.code}</span></td>
+        <td><span class="dot ${b.status}"></span>${b.status === 'in_use' ? 'Riding: ' + esc(b.riderName) : b.status === 'offline' ? 'Hidden' : 'Available'}</td>
+        <td class="${b.online ? 'on' : 'off'}">${b.online ? 'Online' : 'Offline'}<br><span style="color:var(--muted)">${b.locked ? 'Locked' : 'Unlocked'}, seen ${ago(b.lastSeenAt)}</span></td>
+        <td>${esc(b.ownerName)}</td></tr>`).join('') : '<tr><td colspan="4">No bikes yet. Owners list them from the app.</td></tr>';
+
+      document.getElementById('rides').innerHTML = d.rides.length ? d.rides.map(r => `
+        <tr><td>${esc(r.riderName)}</td><td>${esc(r.bikeName)}</td>
+        <td>${r.status === 'active' ? 'Riding now' : r.minutes + ' min'}<br><span style="color:var(--muted)">${new Date(r.startAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}, via ${r.via}</span></td>
+        <td>${r.status === 'active' ? money(r.liveCostCents || 0) + '\u2026' : money(r.costCents)}</td></tr>`).join('') : '<tr><td colspan="4">No rides yet.</td></tr>';
+
+      document.getElementById('live').textContent = 'Live, updated ' + new Date().toLocaleTimeString();
+      return true;
+    }
+    load().then(ok => { if (ok) setInterval(load, 3000); });
+  </script>
+</body>
+</html>
